@@ -1,131 +1,81 @@
-# Coworking Space Service Extension
-The Coworking Space Service is a set of APIs that enables users to request one-time tokens and administrators to authorize access to a coworking space. This service follows a microservice pattern and the APIs are split into distinct services that can be deployed and managed independently of one another.
+# Coworking Space Service: analytics API on Amazon EKS
 
-For this project, you are a DevOps engineer who will be collaborating with a team that is building an API for business analysts. The API provides business analysts basic analytics data on user activity in the service. The application they provide you functions as expected locally and you are expected to help build a pipeline to deploy it in Kubernetes.
+## Build
+The analytics API in `analytics/` (Flask, port 5153) runs on Amazon EKS next to a PostgreSQL 17 database, all in the `coworking` namespace of the `coworking-cluster` cluster in `us-east-1`.
+Every push to `main` triggers a CodeBuild webhook: `buildspec.yaml` logs Docker in to Amazon ECR, builds `analytics/Dockerfile` for `linux/amd64` and pushes `coworking-analytics:1.0.<build number>`, printing the image URI and digest in the build log.
+ECR tags are immutable, so a version number always identifies exactly one image.
 
-## Getting Started
+## Release, verify and roll back
+Building does not deploy: to release, change the `image:` line in `deployments/coworking.yaml` to the new tag (or to `@sha256:<digest>` to pin the exact image), commit it and run `kubectl apply -f deployments/coworking.yaml`.
+Check the rollout with `kubectl -n coworking rollout status deployment/coworking` and `scripts/verify.sh`, which calls the health, readiness and both report routes through the load balancer.
+To roll back, run `kubectl -n coworking rollout undo deployment/coworking`, then put the previous tag back in the manifest so Git matches the cluster.
+The liveness probe (`/health_check`) and the readiness probe (`/readiness_check`, which queries the database) keep traffic away from a pod that cannot serve, so a bad release stops at its first new pod.
 
-### Dependencies
-#### Local Environment
-1. Python Environment - run Python 3.6+ applications and install Python dependencies via `pip`
-2. Docker CLI - build and run Docker images locally
-3. `kubectl` - run commands against a Kubernetes cluster
-4. `helm` - apply Helm Charts to a Kubernetes cluster
+## Configuration, secret and data
+Non-secret settings (`DB_HOST`, `DB_PORT=5432`, `DB_USERNAME`, `DB_NAME`) are in the `coworking-config` ConfigMap, and the only secret, `DB_PASSWORD`, comes from the `coworking-db-credentials` Secret.
+`scripts/create-db-secret.sh` creates that Secret by filling in `deployments/db-secret.template.yaml` in memory from a password file kept outside the repository (generated on first use), so no real value is ever committed.
+PostgreSQL keeps its data on a 1 GiB encrypted gp3 EBS volume provisioned by the EBS CSI driver and is reachable only inside the cluster at `postgresql-service:5432`.
+`scripts/seed-db.sh` loads `db/*.sql` through a loopback-only port-forward (127.0.0.1:5433), skips any step whose data already exists and prints only row counts.
+The `coworking` LoadBalancer Service exposes the API on port 5153, and `loadBalancerSourceRanges` limits it to the test client's address.
 
-#### Remote Resources
-1. AWS CodeBuild - build Docker images remotely
-2. AWS ECR - host Docker images
-3. Kubernetes Environment with AWS EKS - run applications in k8s
-4. AWS CloudWatch - monitor activity and logs in EKS
-5. GitHub - pull and clone code
+## Logging
+CloudWatch Container Insights (EKS add-on `amazon-cloudwatch-observability`) ships each container's stdout to `/aws/containerinsights/coworking-cluster/application`, where the probe requests and the API's 30-second usage report appear.
+The add-on's Application Signals auto-instrumentation is switched off in `infra/addons.sh`, because it injects OpenTelemetry agents into the pod and diverts the app's own log lines away from stdout.
 
-### Setup
-#### 1. Configure a Database
-Set up a Postgres database using a Helm Chart.
+## Setup, evidence and cleanup
+The application code is the official starter, unchanged; its placeholder `deployment/` templates are replaced by `deployments/`, whose ConfigMap uses `DB_USERNAME`, the name `config.py` actually reads.
+A fresh setup runs `eksctl create cluster -f infra/eks-cluster.yaml`, `infra/addons.sh`, `scripts/setup-ci.sh` and `scripts/deploy.sh`, in that order (`scripts/local-check.sh` runs the API locally and in Docker against the same database).
+The screenshots listed below are in `screenshots/`.
+`scripts/cleanup.sh` removes everything, deleting the LoadBalancer Service before the cluster so AWS releases the load balancer, and then lists anything left over.
 
-1. Set up Bitnami Repo
-```bash
-helm repo add <REPO_NAME> https://charts.bitnami.com/bitnami
-```
+| Screenshot | Shows |
+|---|---|
+| `01-codebuild-webhook-success.png` | Build 1 Succeeded, initiator `GitHub-Hookshot` (push webhook), commit `fb31ca6` |
+| `01b-codebuild-log-push-trigger.png` | Build log: `event PUSH, trigger branch/main`, image `coworking-analytics:1.0.1` |
+| `01c-codebuild-log-image-digest.png` | Build log: push of `1.0.1`, digest `sha256:1ca735e4...` |
+| `01d-codebuild-push-webhook.png` | Webhook ACTIVE, event `PUSH`, `HEAD_REF ^refs/heads/main$` |
+| `01e-codebuild-build-history.png` | Builds 1 and 2, both started by the webhook |
+| `02-ecr-image.png`, `02b-ecr-image-1.0.1-digest.png` | ECR images `1.0.1` (deployed) and `1.0.2`, with URI and digest |
+| `03-kubectl-services.png` | `kubectl get svc`: `coworking` LoadBalancer with its hostname, `postgresql-service` |
+| `04-kubectl-pods.png` | `kubectl get pods`: both pods `1/1 Running` |
+| `05-postgres-service.png` | `kubectl describe svc postgresql-service`: port 5432, selector, endpoint |
+| `06-analytics-deployment.png`, `06b-...` | `kubectl describe deployment coworking`: image `1.0.1`, 1 available, probes, ConfigMap and Secret |
+| `07-cloudwatch-application-logs.png`, `07b-...`, `07c-...` | Container Insights application log group: recurring `GET /health_check` and `/readiness_check` 200, usage report |
+| `08-deployed-api-checks.png` | Both report routes through the load balancer, HTTP 200 |
+| `09-local-and-docker-checks.txt` | Local virtualenv and Docker runs against the same database, HTTP 200 |
 
-2. Install PostgreSQL Helm Chart
-```
-helm install <SERVICE_NAME> <REPO_NAME>/postgresql
-```
-
-This should set up a Postgre deployment at `<SERVICE_NAME>-postgresql.default.svc.cluster.local` in your Kubernetes cluster. You can verify it by running `kubectl svc`
-
-By default, it will create a username `postgres`. The password can be retrieved with the following command:
-```bash
-export POSTGRES_PASSWORD=$(kubectl get secret --namespace default <SERVICE_NAME>-postgresql -o jsonpath="{.data.postgres-password}" | base64 -d)
-
-echo $POSTGRES_PASSWORD
-```
-
-<sup><sub>* The instructions are adapted from [Bitnami's PostgreSQL Helm Chart](https://artifacthub.io/packages/helm/bitnami/postgresql).</sub></sup>
-
-3. Test Database Connection
-The database is accessible within the cluster. This means that when you will have some issues connecting to it via your local environment. You can either connect to a pod that has access to the cluster _or_ connect remotely via [`Port Forwarding`](https://kubernetes.io/docs/tasks/access-application-cluster/port-forward-access-application-cluster/)
-
-* Connecting Via Port Forwarding
-```bash
-kubectl port-forward --namespace default svc/<SERVICE_NAME>-postgresql 5432:5432 &
-    PGPASSWORD="$POSTGRES_PASSWORD" psql --host 127.0.0.1 -U postgres -d postgres -p 5432
-```
-
-* Connecting Via a Pod
-```bash
-kubectl exec -it <POD_NAME> bash
-PGPASSWORD="<PASSWORD HERE>" psql postgres://postgres@<SERVICE_NAME>:5432/postgres -c <COMMAND_HERE>
-```
-
-4. Run Seed Files
-We will need to run the seed files in `db/` in order to create the tables and populate them with data.
+| AWS resource (us-east-1) | Name |
+|---|---|
+| EKS cluster and node group | `coworking-cluster` (Kubernetes 1.36), `coworking-nodes` (2 x t3.small) |
+| EKS add-ons | `aws-ebs-csi-driver`, `amazon-cloudwatch-observability` |
+| ECR repository | `coworking-analytics` |
+| CodeBuild project and role | `coworking-analytics-build` (PUSH webhook on `main`), `coworking-codebuild-role` |
+| Kubernetes objects (namespace `coworking`) | Deployments `coworking`, `postgresql`; Services `coworking`, `postgresql-service`; ConfigMap `coworking-config`; Secret `coworking-db-credentials`; PVC `postgresql-pvc`; StorageClass `coworking-gp3` |
+| CloudWatch log groups | `/aws/containerinsights/coworking-cluster/{application,dataplane,host,performance}`, `/aws/codebuild/coworking-analytics-build` |
 
 ```bash
-kubectl port-forward --namespace default svc/<SERVICE_NAME>-postgresql 5432:5432 &
-    PGPASSWORD="$POSTGRES_PASSWORD" psql --host 127.0.0.1 -U postgres -d postgres -p 5432 < <FILE_NAME.sql>
+# Cleanup, step by step (scripts/cleanup.sh runs the same commands and checks for leftovers)
+kubectl -n coworking delete service coworking          # first, so AWS deletes the load balancer
+kubectl delete namespace coworking                     # PostgreSQL and the PVC (its EBS volume is deleted too)
+eksctl delete cluster -f infra/eks-cluster.yaml --wait
+aws ecr delete-repository --repository-name coworking-analytics --force
+aws codebuild delete-webhook --project-name coworking-analytics-build
+aws codebuild delete-project --name coworking-analytics-build
+aws iam delete-role-policy --role-name coworking-codebuild-role --policy-name coworking-codebuild-ecr-push
+aws iam delete-role --role-name coworking-codebuild-role
+for g in application dataplane host performance; do aws logs delete-log-group --log-group-name /aws/containerinsights/coworking-cluster/$g; done
+aws logs delete-log-group --log-group-name /aws/codebuild/coworking-analytics-build
 ```
 
-### 2. Running the Analytics Application Locally
-In the `analytics/` directory:
+## Optional: sizing and cost
+**Memory and CPU.** The API requests 100m CPU and 128Mi and is capped at 500m and 256Mi, while PostgreSQL requests 100m and 256Mi with a 512Mi cap.
+These fit an idle Flask process with a background scheduler and a small seeded database, and leave room for a rolling update on two nodes.
+Revisit them with the Container Insights performance metrics before adding replicas.
 
-1. Install dependencies
-```bash
-pip install -r requirements.txt
-```
-2. Run the application (see below regarding environment variables)
-```bash
-<ENV_VARS> python app.py
-```
+**Instance type.** A t3.small (2 burstable vCPUs, 2 GiB) suits this low-traffic, I/O-bound API and its small database.
+Burst credits cover the 30-second report job and occasional queries, but a t3.small runs only 11 pods, which is why the node group uses two nodes.
+Move to t3.medium for more replicas or a larger database, or to t4g with an arm64 build for a lower price.
 
-There are multiple ways to set environment variables in a command. They can be set per session by running `export KEY=VAL` in the command line or they can be prepended into your command.
-
-* `DB_USERNAME`
-* `DB_PASSWORD`
-* `DB_HOST` (defaults to `127.0.0.1`)
-* `DB_PORT` (defaults to `5432`)
-* `DB_NAME` (defaults to `postgres`)
-
-If we set the environment variables by prepending them, it would look like the following:
-```bash
-DB_USERNAME=username_here DB_PASSWORD=password_here python app.py
-```
-The benefit here is that it's explicitly set. However, note that the `DB_PASSWORD` value is now recorded in the session's history in plaintext. There are several ways to work around this including setting environment variables in a file and sourcing them in a terminal session.
-
-3. Verifying The Application
-* Generate report for check-ins grouped by dates
-`curl <BASE_URL>/api/reports/daily_usage`
-
-* Generate report for check-ins grouped by users
-`curl <BASE_URL>/api/reports/user_visits`
-
-## Project Instructions
-1. Set up a Postgres database with a Helm Chart
-2. Create a `Dockerfile` for the Python application. Use a base image that is Python-based.
-3. Write a simple build pipeline with AWS CodeBuild to build and push a Docker image into AWS ECR
-4. Create a service and deployment using Kubernetes configuration files to deploy the application
-5. Check AWS CloudWatch for application logs
-
-### Deliverables
-1. `Dockerfile`
-2. Screenshot of AWS CodeBuild pipeline
-3. Screenshot of AWS ECR repository for the application's repository
-4. Screenshot of `kubectl get svc`
-5. Screenshot of `kubectl get pods`
-6. Screenshot of `kubectl describe svc <DATABASE_SERVICE_NAME>`
-7. Screenshot of `kubectl describe deployment <SERVICE_NAME>`
-8. All Kubernetes config files used for deployment (ie YAML files)
-9. Screenshot of AWS CloudWatch logs for the application
-10. `README.md` file in your solution that serves as documentation for your user to detail how your deployment process works and how the user can deploy changes. The details should not simply rehash what you have done on a step by step basis. Instead, it should help an experienced software developer understand the technologies and tools in the build and deploy process as well as provide them insight into how they would release new builds.
-
-
-### Stand Out Suggestions
-Please provide up to 3 sentences for each suggestion. Additional content in your submission from the standout suggestions do _not_ impact the length of your total submission.
-1. Specify reasonable Memory and CPU allocation in the Kubernetes deployment configuration
-2. In your README, specify what AWS instance type would be best used for the application? Why?
-3. In your README, provide your thoughts on how we can save on costs?
-
-### Best Practices
-* Dockerfile uses an appropriate base image for the application being deployed. Complex commands in the Dockerfile include a comment describing what it is doing.
-* The Docker images use semantic versioning with three numbers separated by dots, e.g. `1.2.1` and  versioning is visible in the  screenshot. See [Semantic Versioning](https://semver.org/) for more details.
+**Saving costs.** The EKS control plane (about $0.10 an hour) is the largest fixed cost, so delete the stack with `scripts/cleanup.sh` whenever it is not in use.
+Set a retention period (for example 7 days) on the Container Insights log groups and an ECR lifecycle rule that keeps the last ten images, because both grow with every push.
+The VPC has no NAT gateway and the API runs as one replica behind one load balancer, which keeps network charges low.
