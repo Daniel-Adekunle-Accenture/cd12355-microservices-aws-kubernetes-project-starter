@@ -1,0 +1,13 @@
+# 1 GiB ReadWriteOnce volume for the PostgreSQL data directory.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgresql-pvc
+  namespace: coworking
+spec:
+  storageClassName: coworking-gp3
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi

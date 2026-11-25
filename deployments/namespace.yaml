@@ -1,0 +1,7 @@
+# Every project resource lives in this namespace.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: coworking
+  labels:
+    app.kubernetes.io/part-of: coworking

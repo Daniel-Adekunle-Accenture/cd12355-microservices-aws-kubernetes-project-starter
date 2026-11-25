@@ -1,0 +1,39 @@
+# AWS CodeBuild: build the analytics image and push it to Amazon ECR.
+# A GitHub PUSH webhook on main starts this build. The image tag is a three-part version taken
+# from the build number (1.0.<build number>), so every push produces a new, immutable tag.
+version: 0.2
+
+env:
+  shell: bash
+  variables:
+    ECR_REPOSITORY: coworking-analytics
+    VERSION_PREFIX: "1.0"
+    DOCKER_PLATFORM: linux/amd64   # the EKS node group runs x86_64 (t3.small)
+  exported-variables:
+    - IMAGE_TAG
+    - IMAGE_URI
+    - IMAGE_DIGEST
+
+phases:
+  pre_build:
+    on-failure: ABORT
+    commands:
+      - set -o pipefail
+      # The account and registry come from the build itself, so nothing account-specific is in Git.
+      - AWS_ACCOUNT_ID=$(echo "$CODEBUILD_BUILD_ARN" | cut -d':' -f5)
+      - REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+      - IMAGE_TAG="${VERSION_PREFIX}.${CODEBUILD_BUILD_NUMBER}"
+      - IMAGE_URI="${REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
+      - echo "Commit ${CODEBUILD_RESOLVED_SOURCE_VERSION}, event ${CODEBUILD_WEBHOOK_EVENT:-manual}, trigger ${CODEBUILD_WEBHOOK_TRIGGER:-manual}, image ${IMAGE_URI}"
+      # Log Docker in to ECR with a short-lived token from the build's service role.
+      - aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$REGISTRY"
+  build:
+    on-failure: ABORT
+    commands:
+      - docker build --platform "$DOCKER_PLATFORM" --tag "$IMAGE_URI" --label "org.opencontainers.image.revision=${CODEBUILD_RESOLVED_SOURCE_VERSION}" --label "org.opencontainers.image.version=${IMAGE_TAG}" --file analytics/Dockerfile analytics
+  post_build:
+    on-failure: ABORT
+    commands:
+      - docker push "$IMAGE_URI"
+      - IMAGE_DIGEST=$(docker inspect --format '{{index .RepoDigests 0}}' "$IMAGE_URI" | cut -d'@' -f2)
+      - echo "Pushed ${IMAGE_URI} digest ${IMAGE_DIGEST}"

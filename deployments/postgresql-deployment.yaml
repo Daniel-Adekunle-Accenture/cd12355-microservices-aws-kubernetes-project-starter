@@ -1,0 +1,60 @@
+# Single PostgreSQL instance backed by the postgresql-pvc EBS volume.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgresql
+  namespace: coworking
+  labels:
+    app: postgresql
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate   # a ReadWriteOnce volume can be attached to only one pod at a time
+  selector:
+    matchLabels:
+      app: postgresql
+  template:
+    metadata:
+      labels:
+        app: postgresql
+    spec:
+      containers:
+        - name: postgresql
+          image: postgres:17.12-bookworm
+          ports:
+            - name: postgres
+              containerPort: 5432
+          env:
+            - name: POSTGRES_DB
+              valueFrom:
+                configMapKeyRef: {name: coworking-config, key: DB_NAME}
+            - name: POSTGRES_USER
+              valueFrom:
+                configMapKeyRef: {name: coworking-config, key: DB_USERNAME}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: coworking-db-credentials, key: DB_PASSWORD}
+            # The root of an EBS volume holds lost+found, so the data directory is a subdirectory.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -h 127.0.0.1 -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -h 127.0.0.1 -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            failureThreshold: 6
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {cpu: 500m, memory: 512Mi}
+          volumeMounts:
+            - name: postgresql-storage
+              mountPath: /var/lib/postgresql/data
+      volumes:
+        - name: postgresql-storage
+          persistentVolumeClaim:
+            claimName: postgresql-pvc

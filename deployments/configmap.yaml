@@ -1,0 +1,13 @@
+# Non-secret settings, read by analytics/config.py (DB_*) and by the PostgreSQL container.
+# DB_HOST is the in-cluster DNS name of postgresql-service; the app talks to it on port 5432.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: coworking-config
+  namespace: coworking
+data:
+  DB_HOST: postgresql-service.coworking.svc.cluster.local
+  DB_PORT: "5432"
+  DB_USERNAME: coworking
+  DB_NAME: coworking
+  APP_PORT: "5153"

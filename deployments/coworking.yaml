@@ -1,0 +1,76 @@
+# Analytics API: LoadBalancer Service on port 5153 and its Deployment.
+apiVersion: v1
+kind: Service
+metadata:
+  name: coworking
+  namespace: coworking
+  labels:
+    service: coworking
+spec:
+  type: LoadBalancer
+  selector:
+    service: coworking
+  ports:
+    - name: "5153"
+      protocol: TCP
+      port: 5153
+      targetPort: 5153
+  # Only the test client may reach the API: the Udacity workspace's outbound address.
+  # Edit this list (or remove it) to allow other sources.
+  loadBalancerSourceRanges:
+    - 35.223.131.230/32
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: coworking
+  namespace: coworking
+  labels:
+    name: coworking
+spec:
+  replicas: 1
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      service: coworking
+  template:
+    metadata:
+      labels:
+        service: coworking
+    spec:
+      containers:
+        - name: coworking
+          # Release = the ECR image built by CodeBuild (tag 1.0.<build number>).
+          # Promote or roll back by changing this tag (or pinning @sha256:<digest>) and applying this file.
+          image: IMAGE_URI_PLACEHOLDER
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 5153
+          envFrom:
+            - configMapRef:
+                name: coworking-config
+          env:
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: coworking-db-credentials
+                  key: DB_PASSWORD
+          livenessProbe:
+            httpGet:
+              path: /health_check
+              port: 5153
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 2
+          readinessProbe:
+            httpGet:
+              path: /readiness_check
+              port: 5153
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: 500m, memory: 256Mi}
+      restartPolicy: Always

@@ -1,0 +1,32 @@
+# eksctl cluster definition for the Coworking analytics service (Udacity lab, us-east-1).
+# Create:  eksctl create cluster -f infra/eks-cluster.yaml
+# Delete:  delete the LoadBalancer Service first, then: eksctl delete cluster -f infra/eks-cluster.yaml --wait
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+metadata:
+  name: coworking-cluster
+  region: us-east-1
+  version: "1.36"
+  tags:
+    project: coworking
+# Two AZs keep the control plane and the node group in zones that support EKS.
+availabilityZones: ["us-east-1a", "us-east-1b"]
+vpc:
+  nat:
+    # Nodes run in the public subnets, so a NAT Gateway (about 1 USD/day) is not needed.
+    gateway: Disable
+managedNodeGroups:
+  - name: coworking-nodes
+    instanceType: t3.small
+    desiredCapacity: 1
+    minSize: 1
+    maxSize: 2
+    volumeSize: 20
+    labels: {project: coworking}
+    tags: {project: coworking}
+    iam:
+      withAddonPolicies:
+        # AmazonEBSCSIDriverPolicy for the EBS CSI add-on (PostgreSQL PVC)
+        ebs: true
+        # CloudWatchAgentServerPolicy for the CloudWatch Observability add-on (Container Insights)
+        cloudWatch: true
