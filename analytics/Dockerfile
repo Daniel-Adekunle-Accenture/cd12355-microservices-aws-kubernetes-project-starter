@@ -1,8 +1,9 @@
 # Coworking analytics API image (Flask + Flask-SQLAlchemy + psycopg2 + APScheduler).
 # Base: official Python 3.12 slim image on Debian bookworm, pinned to a patch release so every
 # build starts from the same interpreter. psycopg2-binary ships its own libpq, so the image
-# needs no compiler or libpq-dev packages.
-FROM python:3.12.16-slim-bookworm
+# needs no compiler or libpq-dev packages. The image is pulled from the ECR Public mirror of the
+# Docker Official Images, which avoids Docker Hub's anonymous pull limit on shared CodeBuild hosts.
+FROM public.ecr.aws/docker/library/python:3.12.16-slim-bookworm
 
 # PYTHONUNBUFFERED: log lines go straight to stdout/stderr, so Kubernetes and CloudWatch
 # Container Insights receive them immediately. PYTHONDONTWRITEBYTECODE: no .pyc files.

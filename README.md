@@ -2,7 +2,7 @@
 
 ## Build
 The analytics API in `analytics/` (Flask, port 5153) runs on Amazon EKS next to a PostgreSQL 17 database, all in the `coworking` namespace of the `coworking-cluster` cluster in `us-east-1`.
-Every push to `main` triggers a CodeBuild webhook: `buildspec.yaml` logs Docker in to Amazon ECR, builds `analytics/Dockerfile` for `linux/amd64` and pushes `coworking-analytics:1.0.<build number>`, printing the image URI and digest in the build log.
+Every push to `main` triggers a CodeBuild webhook: `buildspec.yaml` logs Docker in to Amazon ECR, builds `analytics/Dockerfile` (Python base pulled from the ECR Public mirror of Docker Official Images, avoiding Docker Hub pull limits) for `linux/amd64` and pushes `coworking-analytics:1.0.<build number>`, printing the image URI and digest in the build log.
 ECR tags are immutable, so a version number always identifies exactly one image.
 
 ## Release, verify and roll back
